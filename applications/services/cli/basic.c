@@ -25,13 +25,16 @@
  */
 
 #include "basic.h"
+#include "types.h"
+#include "cli.h"
+#include "cli_i.h"
+#include "cli_commands.h"
+#include "cli_vcp.h"
+#include <furi_hal_version.h>
+#include <loader/loader.h>
 
-#ifdef BP_ENABLE_BASIC_SUPPORT
-
-#if defined(BUSPIRATEV3) && defined(BP_BASIC_I2C_FILESYSTEM)
-#warning "BP_BASIC_I2C_FILESYSTEM is not supported on v3 boards!"
-#undef BP_BASIC_I2C_FILESYSTEM
-#endif /* BP_BASIC_I2C_FILESYSTEM */
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wunused-variable"
 
 #if BP_BASIC_PROGRAM_SPACE <= 0
 #error "Invalid BASIC program space value"
@@ -52,11 +55,13 @@
  */
 #define BP_BASIC_VARIABLES_COUNT 26
 
-#include "aux_pin.h"
-#include "base.h"
-#include "bitbang.h"
-#include "core.h"
-#include "proc_menu.h"
+// I am commenting these out to get it to compile and see if I can just run the interpreter at all and make a program that doesn't
+// try to access any hardware. once that works then I can start adding in the hardware access functions
+//#include "aux_pin.h"
+//#include "base.h"
+//#include "bitbang.h"
+//#include "core.h"
+//#include "proc_menu.h"
 
 #define INVALID_TOKEN 0x00
 
@@ -204,10 +209,33 @@ typedef enum {
  */
 #define LINE_NUMBER_FOUND YES
 
-extern bus_pirate_configuration_t bus_pirate_configuration;
-extern mode_configuration_t mode_configuration;
-extern command_t last_command;
-extern bus_pirate_protocol_t enabled_protocols[ENABLED_PROTOCOLS_COUNT];
+#define BELL 0x07
+
+#define BP_COMMAND_BUFFER_SIZE 256
+#define BP_USER_MACROS_COUNT 5
+#define BP_USER_MACRO_MAX_LENGTH 32
+#define CMDLENMSK (BP_COMMAND_BUFFER_SIZE - 1)
+
+char cmdbuf[BP_COMMAND_BUFFER_SIZE] = {0};
+unsigned int cmdend;
+unsigned int cmdstart;
+
+static char user_macros[BP_USER_MACROS_COUNT][BP_USER_MACRO_MAX_LENGTH];
+static int user_macro;
+
+//extern bus_pirate_configuration_t bus_pirate_configuration;
+//extern mode_configuration_t mode_configuration;
+
+// copied from base.h originally
+typedef struct {
+  uint16_t num;
+  uint16_t repeat;
+  uint8_t cmd;
+} __attribute__((packed)) command_t;
+
+command_t last_command;
+
+//extern bus_pirate_protocol_t enabled_protocols[ENABLED_PROTOCOLS_COUNT];
 
 typedef struct {
   uint16_t from;
@@ -308,7 +336,7 @@ static bool search_line_number(const uint16_t line, uint16_t *result);
  * @see TOK_PULLUP
  * @see TOK_ADC
  */
-static uint16_t handle_special_token(const uint8_t token);
+//static uint16_t handle_special_token(const uint8_t token);
 
 /**
  * @brief Checks whether the string at the BASIC parser current position matches
@@ -320,6 +348,7 @@ static uint16_t handle_special_token(const uint8_t token);
  * @see INVALID_TOKEN
  */
 static uint8_t get_token(void);
+
 
 static void list(void);
 static void interpreter(void);
@@ -333,7 +362,6 @@ static int16_t get_number_or_variable(void);
 static int16_t get_multiplication_division_bitwise_ops(void);
 static int16_t assign(void);
 static void interpreter(void);
-static void list(void);
 
 /**
  * @brief Compares the string pointed by the given pointer with the current
@@ -345,13 +373,214 @@ static void list(void);
  */
 static bool compare(char *pointer);
 
-#ifdef BP_BASIC_I2C_FILESYSTEM
-static void directory(void);
-static void save(void);
-static void format(void);
-static void load(void);
-static void waiteeprom(void);
-#endif /* BP_BASIC_I2C_FILESYSTEM */
+uint8_t get_token(void) {
+  size_t index;
+
+  for (index = 0; index < NUMTOKEN; index++) {
+    if (compare(tokens[index])) {
+      return TOKENS + index;
+    }
+  }
+
+  return 0;
+}
+
+int getint(void) // get int from user (accept decimal, hex (0x) or binairy (0b)
+{
+  int i;
+  int number;
+
+  i = 0;
+  number = 0;
+
+  if ((cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 0x31) &&
+      (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 0x39)) // 1-9 is for sure decimal
+  {
+    number = cmdbuf[(cmdstart + i) & CMDLENMSK] - 0x30;
+    i++;
+    while ((cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 0x30) &&
+           (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 0x39)) // consume all digits
+    {
+      number *= 10;
+      number += cmdbuf[((cmdstart + i) & CMDLENMSK)] - 0x30;
+      i++;
+    }
+  } else if (cmdbuf[((cmdstart + i) & CMDLENMSK)] ==
+             0x30) // 0 could be anything
+  {
+    i++;
+    if ((cmdbuf[((cmdstart + i) & CMDLENMSK)] == 'b') ||
+        (cmdbuf[((cmdstart + i) & CMDLENMSK)] == 'B')) {
+      i++;
+      while ((cmdbuf[((cmdstart + i) & CMDLENMSK)] == '1') ||
+             (cmdbuf[((cmdstart + i) & CMDLENMSK)] == '0')) {
+        number <<= 1;
+        number += cmdbuf[((cmdstart + i) & CMDLENMSK)] - 0x30;
+        i++;
+      }
+    } else if ((cmdbuf[((cmdstart + i) & CMDLENMSK)] == 'x') ||
+               (cmdbuf[((cmdstart + i) & CMDLENMSK)] == 'X')) {
+      i++;
+      while (((cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 0x30) &&
+              (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 0x39)) ||
+             ((cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 'A') &&
+              (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 'F')) ||
+             ((cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 'a') &&
+              (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 'f'))) {
+        number <<= 4;
+        if ((cmdbuf[(cmdstart + i) & CMDLENMSK] >= 0x30) &&
+            (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 0x39)) {
+          number += cmdbuf[((cmdstart + i) & CMDLENMSK)] - 0x30;
+        } else {
+          cmdbuf[((cmdstart + i) & CMDLENMSK)] |= 0x20; // make it lowercase
+          number +=
+              cmdbuf[((cmdstart + i) & CMDLENMSK)] - 0x57; // 'a'-0x61+0x0a
+        }
+        i++;
+      }
+    } else if ((cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 0x30) &&
+               (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 0x39)) {
+      number = cmdbuf[((cmdstart + i) & CMDLENMSK)] - 0x30;
+      while (
+          (cmdbuf[((cmdstart + i) & CMDLENMSK)] >= 0x30) &&
+          (cmdbuf[((cmdstart + i) & CMDLENMSK)] <= 0x39)) // consume all digits
+      {
+        number *= 10;
+        number += cmdbuf[((cmdstart + i) & CMDLENMSK)] - 0x30;
+        i++;
+      }
+    }
+  } else // how did we come here??
+  {
+    //mode_configuration.command_error = YES;
+    return 0;
+  }
+
+  cmdstart += i; // we used i chars
+  cmdstart &= CMDLENMSK;
+  return number;
+} // getint(void)
+
+void bp_basic_initialize(void) {
+  basic_program_area[0] = TOK_LEN + 1;
+  basic_program_area[1] = 0xFF;
+  basic_program_area[2] = 0xFF;
+  basic_program_area[3] = TOK_END;
+  memset(&basic_program_area[4], 0x00, BP_BASIC_PROGRAM_SPACE - 4);
+}
+
+// copied from proc_menu.c and according to ChatGPT this is needed for assigning values to variables as it is used later.
+// gets number from input
+// -1 = abort (x)
+// -2 = input to much
+// 0-max return
+// x=1 exit is enabled (we don't want that in the mode changes ;)
+
+int getnumber(int def, int min, int max,
+              int x) // default, minimum, maximum, show exit option
+{
+  char c;
+  char buf[6]; // max 4 digits;
+  int i, j, stop, temp, neg;
+
+again: // need to do it proper with whiles and ifs..
+
+  i = 0;
+  stop = 0;
+  temp = 0;
+  neg = 0;
+
+  printf("\r\n(");
+  if (def < 0) {
+    printf("x");
+  } else {
+    printf("%i", def);
+  }
+  printf(")>");
+
+  while (!stop) {
+    //c = user_serial_read_byte();
+    c = cli_getc(cli); //where does this cli instance get created? 
+    switch (c) {
+    case 0x08:
+      if (i) {
+        i--;
+        // MSG_DESTRUCTIVE_BACKSPACE;
+        printf("Destructive Backspace");
+      } else {
+        if (neg) {
+          neg = 0;
+          // MSG_DESTRUCTIVE_BACKSPACE;
+          printf("Destructive Backspace");
+        } else {
+          printf("\a");
+        }
+      }
+      break;
+    case 0x0A:
+    case 0x0D:
+      stop = 1;
+      break;
+    case '-':
+      if (!i) // enable negative numbers
+      {
+        printf("-"); 
+        neg = 1;
+      } else {
+        printf("\a");
+      }
+      break;
+    case 'x':
+      //if (x)
+        return -1; // user wants to quit :( only if we enable it :D
+    default:
+      if ((c >= 0x30) && (c <= 0x39)) // we got a digit
+      {
+        if (i > 3) // 0-9999 should be enough??
+        {
+          printf("\a");
+          i = 4;
+        } else {
+          //user_serial_transmit_character(c);
+          printf("%c", c);
+          buf[i] = c; // store user input
+          i++;
+        }
+      } else // ignore input :)
+      {
+        printf("\a");
+      }
+    }
+  }
+  printf("\r\n");
+
+  if (i == 0) {
+    return def; // no user input so return default option
+  } else {
+    temp = 0;
+    i--;
+    j = i;
+
+    for (; i >= 0; i--) {
+      temp *= 10;
+      temp += (buf[j - i] - 0x30);
+    }
+
+    if ((temp >= min) && (temp <= max)) {
+      if (neg) {
+        return -temp;
+      } else {
+        return temp;
+      }
+    } else { // bpWline("\r\nInvalid choice, try again\r\n");
+      //BPMSG1211;
+      printf("\r\nInvalid choice, try again\r\n");
+      goto again;
+    }
+  }
+  return temp; // we dont get here, but keep compiler happy
+}
+// end getnumber function
 
 void handle_else_statement(void) {
   if (basic_program_area[basic_program_counter] != TOK_ELSE) {
@@ -386,42 +615,42 @@ bool search_line_number(const uint16_t line, uint16_t *result) {
   return LINE_NUMBER_NOT_FOUND;
 }
 
-uint16_t handle_special_token(const uint8_t token) {
-  switch (token) {
+// uint16_t handle_special_token(const uint8_t token) {
+//   switch (token) {
 
-  case TOK_RECEIVE:
-    return enabled_protocols[bus_pirate_configuration.bus_mode].read();
+//   case TOK_RECEIVE:
+//     return enabled_protocols[bus_pirate_configuration.bus_mode].read();
 
-  case TOK_SEND:
-    return enabled_protocols[bus_pirate_configuration.bus_mode].send(assign());
+//   case TOK_SEND:
+//     return enabled_protocols[bus_pirate_configuration.bus_mode].send(assign());
 
-  case TOK_AUX:
-    return bp_aux_pin_read();
+//   case TOK_AUX:
+//     return bp_aux_pin_read();
 
-  case TOK_DAT:
-    return enabled_protocols[bus_pirate_configuration.bus_mode].data_state();
+//   case TOK_DAT:
+//     return enabled_protocols[bus_pirate_configuration.bus_mode].data_state();
 
-  case TOK_BITREAD:
-    return enabled_protocols[bus_pirate_configuration.bus_mode].read_bit();
+//   case TOK_BITREAD:
+//     return enabled_protocols[bus_pirate_configuration.bus_mode].read_bit();
 
-  case TOK_PSU:
-    return BP_VREGEN;
+//   case TOK_PSU:
+//     return BP_VREGEN;
 
-  case TOK_PULLUP:
-    return ~BP_PULLUP;
+//   case TOK_PULLUP:
+//     return ~BP_PULLUP;
 
-  case TOK_ADC: {
-    bp_enable_adc();
-    uint16_t adc_measurement = bp_read_adc(BP_ADC_PROBE);
-    bp_disable_adc();
+//   case TOK_ADC: {
+//     bp_enable_adc();
+//     uint16_t adc_measurement = bp_read_adc(BP_ADC_PROBE);
+//     bp_disable_adc();
 
-    return adc_measurement;
-  }
+//     return adc_measurement;
+//   }
 
-  default:
-    return 0;
-  }
-}
+//   default:
+//     return 0;
+//   }
+// }
 
 int16_t get_number_or_variable(void) {
   int16_t temp = 0;
@@ -439,7 +668,8 @@ int16_t get_number_or_variable(void) {
     }
 
     if (basic_program_area[basic_program_counter] > TOKENS) {
-      return handle_special_token(basic_program_area[basic_program_counter++]);
+      //return handle_special_token(basic_program_area[basic_program_counter++]);
+      printf("Special token handled here for hardware interaction\n");
     }
 
     while ((basic_program_area[basic_program_counter] >= '0') &&
@@ -539,7 +769,7 @@ void interpreter(void) {
   basic_current_nested_for_index = 0;
   basic_current_stack_frame = 0;
   basic_data_read_pointer = 0;
-  bus_pirate_configuration.quiet = ON;
+  //bus_pirate_configuration.quiet = ON;
 
   memset((void *)&basic_variables, 0, sizeof(basic_variables));
 
@@ -624,7 +854,7 @@ void interpreter(void) {
     }
 
     case TOK_RETURN:
-      bp_write_string(STAT_RETURN);
+      printf(STAT_RETURN); //replaced bp_write_string with printf
 
       program_counter_updated = YES;
       if (basic_current_stack_frame) {
@@ -647,10 +877,9 @@ void interpreter(void) {
         if (basic_program_area[basic_program_counter] == '\"') {
           basic_program_counter++;
           while (basic_program_area[basic_program_counter] != '\"') {
-            bus_pirate_configuration.quiet = 0;
-            user_serial_transmit_character(
+            printf("%d",
+              // replaced user_serial_transmit_character with printf
                 basic_program_area[basic_program_counter++]);
-            bus_pirate_configuration.quiet = 1;
           }
           basic_program_counter++;
         } else if (((basic_program_area[basic_program_counter] >= 'A') &&
@@ -658,30 +887,26 @@ void interpreter(void) {
                    ((basic_program_area[basic_program_counter] >= TOKENS) &&
                     (basic_program_area[basic_program_counter] < TOK_LEN))) {
           temp = assign();
-          bus_pirate_configuration.quiet = 0;
-          bp_write_dec_word(temp);
-          bus_pirate_configuration.quiet = 1;
+          // bp_write_dec_word(temp);
+          printf("%d", temp);
         } else if (basic_program_area[basic_program_counter] == ';') {
           basic_program_counter++;
         }
       }
       if (basic_program_area[basic_program_counter - 1] != ';') {
-        bus_pirate_configuration.quiet = 0;
-        bpBR;
-        bus_pirate_configuration.quiet = 1;
+        printf("\r\n");
       }
       handle_else_statement();
       break;
 
     case TOK_INPUT:
       program_counter_updated = YES;
-      bus_pirate_configuration.quiet = NO;
       basic_program_counter += 4;
 
       if (basic_program_area[basic_program_counter] == '\"') {
         basic_program_counter++;
         while (basic_program_area[basic_program_counter] != '\"') {
-          user_serial_transmit_character(
+          printf("%d",
               basic_program_area[basic_program_counter++]);
         }
         basic_program_counter++;
@@ -696,7 +921,6 @@ void interpreter(void) {
           getnumber(0, 0, 0x7FFF, 0);
       basic_program_counter++;
       handle_else_statement();
-      bus_pirate_configuration.quiet = YES;
       break;
 
     case TOK_FOR:
@@ -800,7 +1024,8 @@ void interpreter(void) {
       program_counter_updated = YES;
       basic_program_counter += 4;
 
-      enabled_protocols[bus_pirate_configuration.bus_mode].start();
+      // enabled_protocols[bus_pirate_configuration.bus_mode].start();
+      printf("Start something\n");
       handle_else_statement();
       break;
 
@@ -808,7 +1033,8 @@ void interpreter(void) {
       program_counter_updated = YES;
       basic_program_counter += 4;
 
-      enabled_protocols[bus_pirate_configuration.bus_mode].start_with_read();
+      // enabled_protocols[bus_pirate_configuration.bus_mode].start_with_read();
+      printf("Start something with read\n");
       handle_else_statement();
       break;
 
@@ -816,7 +1042,8 @@ void interpreter(void) {
       program_counter_updated = YES;
       basic_program_counter += 4;
 
-      enabled_protocols[bus_pirate_configuration.bus_mode].stop();
+      // enabled_protocols[bus_pirate_configuration.bus_mode].stop();
+      printf("Stop something\n");
       handle_else_statement();
       break;
 
@@ -824,25 +1051,28 @@ void interpreter(void) {
       program_counter_updated = YES;
       basic_program_counter += 4;
 
-      enabled_protocols[bus_pirate_configuration.bus_mode].stop_from_read();
+      // enabled_protocols[bus_pirate_configuration.bus_mode].stop_from_read();
+      printf("Stop something from read\n");
       handle_else_statement();
       break;
 
     case TOK_SEND:
       program_counter_updated = YES;
       basic_program_counter += 4;
-      enabled_protocols[bus_pirate_configuration.bus_mode].send((int)assign());
+      // enabled_protocols[bus_pirate_configuration.bus_mode].send((int)assign());
+      printf("Send something\n");
       handle_else_statement();
       break;
 
     case TOK_AUX:
       program_counter_updated = YES;
       basic_program_counter += 4;
+      printf("Put AUX stuff here\n");
 
       if (assign()) {
-        bp_aux_pin_set_high();
+        //bp_aux_pin_set_high();
       } else {
-        bp_aux_pin_set_low();
+        //bp_aux_pin_set_low();
       }
       handle_else_statement();
       break;
@@ -850,7 +1080,8 @@ void interpreter(void) {
     case TOK_PSU:
       program_counter_updated = YES;
       basic_program_counter += 4;
-      bp_set_voltage_regulator_state(assign() ? ON : OFF);
+      printf("Put PSU stuff here\n");
+      //bp_set_voltage_regulator_state(assign() ? ON : OFF);
       handle_else_statement();
       break;
 
@@ -858,55 +1089,59 @@ void interpreter(void) {
       program_counter_updated = YES;
       basic_program_counter += 4;
 
-      if (assign()) {
-        mode_configuration.alternate_aux = ON;
-      } else {
-        mode_configuration.alternate_aux = OFF;
-      }
+      printf("Put AUXPIN stuff here\n");
+
+      // if (assign()) {
+      //   mode_configuration.alternate_aux = ON;
+      // } else {
+      //   mode_configuration.alternate_aux = OFF;
+      // }
       handle_else_statement();
       break;
 
     case TOK_FREQ: {
-      int16_t frequency = assign();
-      int16_t duty_cycle = assign();
+      //int16_t frequency = assign();
+      //int16_t duty_cycle = assign();
+      printf("PWM frequency stuff goes here\n");
 
       program_counter_updated = YES;
       basic_program_counter += 4;
 
-      if (frequency < PWM_MINIMUM_FREQUENCY) {
-        frequency = PWM_MINIMUM_FREQUENCY;
-      }
-      if (frequency > PWM_MAXIMUM_FREQUENCY) {
-        frequency = PWM_MAXIMUM_FREQUENCY;
-      }
+      // if (frequency < PWM_MINIMUM_FREQUENCY) {
+      //   frequency = PWM_MINIMUM_FREQUENCY;
+      // }
+      // if (frequency > PWM_MAXIMUM_FREQUENCY) {
+      //   frequency = PWM_MAXIMUM_FREQUENCY;
+      // }
 
-      if (duty_cycle < PWM_MINIMUM_DUTY_CYCLE) {
-        duty_cycle = PWM_MINIMUM_DUTY_CYCLE;
-      }
-      if (duty_cycle > PWM_MAXIMUM_DUTY_CYCLE) {
-        duty_cycle = PWM_MAXIMUM_DUTY_CYCLE;
-      }
+      // if (duty_cycle < PWM_MINIMUM_DUTY_CYCLE) {
+      //   duty_cycle = PWM_MINIMUM_DUTY_CYCLE;
+      // }
+      // if (duty_cycle > PWM_MAXIMUM_DUTY_CYCLE) {
+      //   duty_cycle = PWM_MAXIMUM_DUTY_CYCLE;
+      // }
 
-      bp_update_pwm(frequency, duty_cycle);
+      // bp_update_pwm(frequency, duty_cycle);
 
       handle_else_statement();
       break;
     }
 
     case TOK_DUTY: {
-      int16_t duty_cycle = assign();
+      //int16_t duty_cycle = assign();
 
       program_counter_updated = YES;
       basic_program_counter += 4;
+      printf("Duty cycle stuff goes here\n");
 
-      if (duty_cycle < PWM_MINIMUM_DUTY_CYCLE) {
-        duty_cycle = PWM_MINIMUM_DUTY_CYCLE;
-      }
-      if (duty_cycle > PWM_MAXIMUM_DUTY_CYCLE) {
-        duty_cycle = PWM_MAXIMUM_DUTY_CYCLE;
-      }
+      // if (duty_cycle < PWM_MINIMUM_DUTY_CYCLE) {
+      //   duty_cycle = PWM_MINIMUM_DUTY_CYCLE;
+      // }
+      // if (duty_cycle > PWM_MAXIMUM_DUTY_CYCLE) {
+      //   duty_cycle = PWM_MAXIMUM_DUTY_CYCLE;
+      // }
 
-      bp_update_duty_cycle(duty_cycle);
+      //bp_update_duty_cycle(duty_cycle);
 
       handle_else_statement();
       break;
@@ -915,53 +1150,58 @@ void interpreter(void) {
     case TOK_DAT:
       program_counter_updated = 1;
       basic_program_counter += 4;
+      printf("DAT stuff goes here\n");
 
-      if (assign()) {
-        enabled_protocols[bus_pirate_configuration.bus_mode].data_high();
-      } else {
-        enabled_protocols[bus_pirate_configuration.bus_mode].data_low();
-      }
+      // if (assign()) {
+      //   enabled_protocols[bus_pirate_configuration.bus_mode].data_high();
+      // } else {
+      //   enabled_protocols[bus_pirate_configuration.bus_mode].data_low();
+      // }
       handle_else_statement();
       break;
 
     case TOK_CLK:
       program_counter_updated = YES;
       basic_program_counter += 4;
+      printf("CLK stuff goes here\n");
 
-      switch (assign()) {
-      case 0:
-        enabled_protocols[bus_pirate_configuration.bus_mode].clock_low();
-        break;
-      case 1:
-        enabled_protocols[bus_pirate_configuration.bus_mode].clock_high();
-        break;
-      case 2:
-        enabled_protocols[bus_pirate_configuration.bus_mode].clock_pulse();
-        break;
-      }
+      // switch (assign()) {
+      // case 0:
+      //   enabled_protocols[bus_pirate_configuration.bus_mode].clock_low();
+      //   break;
+      // case 1:
+      //   enabled_protocols[bus_pirate_configuration.bus_mode].clock_high();
+      //   break;
+      // case 2:
+      //   enabled_protocols[bus_pirate_configuration.bus_mode].clock_pulse();
+      //   break;
+      // }
       handle_else_statement();
       break;
 
     case TOK_PULLUP:
       program_counter_updated = YES;
       basic_program_counter += 4;
-      bp_set_pullup_state(assign() ? ON : OFF);
+      printf("Pullup stuff goes here\n");
+      // bp_set_pullup_state(assign() ? ON : OFF);
       handle_else_statement();
       break;
 
     case TOK_DELAY:
       program_counter_updated = YES;
       basic_program_counter += 4;
-      temp = assign();
-      bp_delay_ms(temp);
+      printf("Delay stuff goes here\n");
+      //temp = assign();
+      // bp_delay_ms(temp);
       handle_else_statement();
       break;
 
     case TOK_MACRO:
       program_counter_updated = YES;
       basic_program_counter += 4;
-      temp = assign();
-      enabled_protocols[bus_pirate_configuration.bus_mode].run_macro(temp);
+      printf("Macro stuff goes here\n");
+      //temp = assign();
+      // enabled_protocols[bus_pirate_configuration.bus_mode].run_macro(temp);
       handle_else_statement();
       break;
 
@@ -979,19 +1219,9 @@ void interpreter(void) {
     }
     program_counter_updated = NO;
   }
+} // end of basic_interpreter??? 
 
-  bus_pirate_configuration.quiet = OFF;
 
-  if ((status != STATUS_CODE_FINISHED) && (status != STATUS_CODE_UNKNOWN)) {
-    BPMSG1047;
-    bp_write_dec_word(status);
-    BPMSG1048;
-    bp_write_dec_word(lineno);
-    BPMSG1049;
-    bp_write_dec_word(basic_program_counter);
-    bpBR;
-  }
-}
 
 void list(void) {
   unsigned char c;
@@ -1002,24 +1232,25 @@ void list(void) {
   while (basic_program_area[basic_program_counter]) {
     c = basic_program_area[basic_program_counter];
     if (c < TOK_LET) {
-      user_serial_transmit_character(c);
+      printf("%d",c);
     } else if (c > TOK_LEN) {
-      bpBR;
+      printf("\r\n");
       lineno = (basic_program_area[basic_program_counter + 1] << 8) +
                basic_program_area[basic_program_counter + 2];
       basic_program_counter += 2;
-      bp_write_dec_word(lineno);
-      bpSP;
+      //bp_write_dec_word(lineno);
+      printf("%u",lineno);
+      printf(" ");
     } else {
-      bpSP;
-      bp_write_string(tokens[c - TOKENS]);
-      bpSP;
+      printf(" ");
+      printf(tokens[c - TOKENS]); //replaced bp_write_string with printf
+      printf(" ");
     }
     basic_program_counter++;
   }
-  bpBR;
-  bp_write_dec_word(basic_program_counter - 1);
-  BPMSG1050;
+  printf("\r\n");
+  printf("%i", (basic_program_counter - 1));
+  //BPMSG1050;
 }
 
 bool compare(char *pointer) {
@@ -1038,20 +1269,16 @@ bool compare(char *pointer) {
   return YES;
 }
 
-uint8_t get_token(void) {
-  size_t index;
 
-  for (index = 0; index < NUMTOKEN; index++) {
-    if (compare(tokens[index])) {
-      return TOKENS + index;
-    }
+
+void consumewhitechars(void) {
+  while (cmdbuf[cmdstart] == 0x20) {
+    cmdstart = (cmdstart + 1) & CMDLENMSK;
   }
-
-  return 0;
 }
 
 void bp_basic_enter_interactive_interpreter(void) {
-  int i, temp;
+  int i, j, temp;
   int end, len; //, string;
   bool string_found = NO;
   unsigned char line[35];
@@ -1115,7 +1342,7 @@ void bp_basic_enter_interactive_interpreter(void) {
       }
       i++;
       if (i > 35) {
-        BPMSG1051;
+        //BPMSG1051;
         return;
       }
     }
@@ -1157,311 +1384,29 @@ void bp_basic_enter_interactive_interpreter(void) {
   } else {
     if (compare("RUN")) {
       interpreter();
-      bpBR;
+      printf("\r\n");
     } else if (compare("LIST")) {
       list();
     } else if (compare("EXIT")) {
-      bus_pirate_configuration.basic = NO;
+      //bus_pirate_configuration.basic = NO;
     }
-#ifdef BP_BASIC_I2C_FILESYSTEM
-    else if (compare("FORMAT")) {
-      format();
-    } else if (compare("SAVE")) {
-      save();
-    } else if (compare("LOAD")) {
-      load();
-    }
-#endif /* BP_BASIC_I2C_FILESYSTEM */
 
-#ifdef BP_BASIC_DEBUG_COMMAND
-    else if (compare("DEBUG")) {
-      for (i = 0; i < BP_BASIC_PROGRAM_SPACE; i += 16) {
-        for (j = 0; j < 16; j++) {
-          bp_write_hex_byte(basic_program_area[i + j]);
-          bpSP;
-        }
+
+  //#ifdef BP_BASIC_DEBUG_COMMAND
+  else if (compare("DEBUG")) {
+    for (i = 0; i < BP_BASIC_PROGRAM_SPACE; i += 16) {
+      for (j = 0; j < 16; j++) {
+        printf("%X", (basic_program_area[i + j]));
+        printf(" ");
       }
     }
-#endif /* BP_BASIC_DEBUG_COMMAND */
+  }
+  //#endif /* BP_BASIC_DEBUG_COMMAND */
 
     else if (compare("NEW")) {
       bp_basic_initialize();
     } else {
-      BPMSG1052;
+      //BPMSG1052;
     }
   }
 }
-
-void bp_basic_initialize(void) {
-  basic_program_area[0] = TOK_LEN + 1;
-  basic_program_area[1] = 0xFF;
-  basic_program_area[2] = 0xFF;
-  basic_program_area[3] = TOK_END;
-  memset(&basic_program_area[4], 0x00, BP_BASIC_PROGRAM_SPACE - 4);
-}
-
-#ifdef BP_BASIC_I2C_FILESYSTEM
-
-// i2c eeprom interaction
-// need to incorperate it in bitbang or r2wire!
-// CvD: I stole most off it from bitbang.c/h
-
-#define BASSDA 1
-#define BASSCL 2
-#define BASI2CCLK 100
-
-#define EEP24LC256
-
-#ifdef EEP24LC256
-
-#define I2CADDR 0xA0
-#define EEPROMSIZE 0x8000
-#define EEPROMPAGE 64
-
-#endif
-
-// globals
-int eeprom_lastprog;
-unsigned int eeprom_lastmem;
-
-void HIZbbL(unsigned int pins, int delay) {
-  IOLAT &= (~pins);   // pins to 0
-  IODIR &= (~pins);   // direction to output
-  bp_delay_us(delay); // delay
-}
-void HIZbbH(unsigned int pins, int delay) {
-  IODIR |= pins;      // open collector output high
-  bp_delay_us(delay); // delay
-}
-unsigned char HIZbbR(unsigned int pin) {
-  IODIR |= pin; // pin as input
-  Nop();
-  Nop();
-  Nop();
-  if (IOPOR & pin)
-    return 1;
-  else
-    return 0; // clear all but pin bit and return result
-}
-
-void basi2cstart(void) {
-  HIZbbH((BASSDA | BASSCL), BASI2CCLK); // both hi
-  HIZbbL(BASSDA, BASI2CCLK);            // data down
-  HIZbbL(BASSCL, BASI2CCLK);            // clk down
-  HIZbbH(BASSDA, BASI2CCLK);            // data up
-}
-
-void basi2cstop(void) {
-  HIZbbL((BASSDA | BASSCL), BASI2CCLK);
-  HIZbbH(BASSCL, BASI2CCLK);
-  HIZbbH(BASSDA, BASI2CCLK);
-}
-
-unsigned char basi2cread(int ack) {
-  int i;
-  unsigned char c;
-
-  c = 0;
-  HIZbbR(BASSDA);
-
-  for (i = 0; i < 8; i++) {
-    HIZbbL(BASSCL, BASI2CCLK / 5);
-    HIZbbH(BASSCL, BASI2CCLK);
-    c <<= 1;
-    c |= HIZbbR(BASSDA);
-
-    HIZbbL(BASSCL, BASI2CCLK);
-  }
-
-  if (ack) {
-    HIZbbL(BASSDA, BASI2CCLK / 5);
-  }
-  HIZbbH(BASSCL, BASI2CCLK);
-  HIZbbL(BASSCL, BASI2CCLK);
-
-  return c;
-}
-
-int basi2cwrite(unsigned char c) {
-  int i;
-  unsigned char mask;
-
-  mask = 0x80;
-
-  for (i = 0; i < 8; i++) {
-    if (c & mask) {
-      HIZbbH(BASSDA, BASI2CCLK / 5);
-      // bpWstring("W1");
-    } else {
-      HIZbbL(BASSDA, BASI2CCLK / 5);
-      // bpWstring("W0");
-    }
-    HIZbbH(BASSCL, BASI2CCLK);
-    HIZbbL(BASSCL, BASI2CCLK);
-    mask >>= 1;
-  }
-
-  HIZbbH(BASSCL, BASI2CCLK);
-  i = HIZbbR(BASSDA);
-  HIZbbL(BASSCL, BASI2CCLK);
-
-  return (i ^ 0x01);
-}
-
-int checkeeprom(void) { // just to be sure
-  basi2cstop();
-  basi2cstop();
-  basi2cstart();
-  if (!basi2cwrite(I2CADDR)) { // bpWline("No EEPROM");
-    BPMSG1053;
-    return 0;
-  }
-  basi2cwrite(0x00);
-  basi2cwrite(0x00);
-  basi2cstart();
-  if (basi2cread(1) == 0x00) // check for any data
-  {
-    bp_write_line("No EEPROM"); // if 0 prolly no pullup and eeprom (PROLLY!)
-    BPMSG1053;
-    return 0;
-  }
-  basi2cstop();
-  return 1;
-}
-
-void format(void) {
-  int i, j;
-
-  basi2cstop();
-  basi2cstart();
-  if (!basi2cwrite(I2CADDR)) { // bpWline("No EEPROM");
-    BPMSG1053;
-    return;
-  }
-  basi2cstop();
-
-  // bpWstring("Erasing");
-  BPMSG1054;
-  for (i = 0; i < EEPROMSIZE; i += EEPROMPAGE) {
-    basi2cstart();
-    basi2cwrite(I2CADDR);
-    basi2cwrite((i >> 8));
-    basi2cwrite((i & 0x0FF));
-    for (j = 0; j < EEPROMPAGE; j++) {
-      basi2cwrite(0xFF);
-    }
-    basi2cstop();
-    user_serial_transmit_character('.');
-    waiteeprom();
-  }
-  // bpWline("done");
-  BPMSG1055;
-}
-
-void waiteeprom(void) {
-  int wait;
-  wait = 1;
-  while (wait) {
-    basi2cstart();
-    wait = basi2cwrite(I2CADDR);
-    basi2cstop();
-  }
-}
-
-void save(void) {
-  int i, j;
-  int slot;
-
-  consumewhitechars();
-  slot = getint();
-
-  if (slot == 0) { // bpWline("Syntax error");
-    BPMSG1052;
-    return;
-  }
-
-  // bpWstring("Saving to slot ");
-  BPMSG1056;
-  bp_write_dec_byte(slot);
-  bpBR;
-
-  if (slot > (EEPROMSIZE / PGMSIZE)) { // bpWline("Invalid slot");
-    BPMSG1057;
-    return;
-  }
-
-  if (!checkeeprom()) {
-    return;
-  }
-
-  slot *= PGMSIZE;
-
-  basi2cstop();
-  basi2cwrite(I2CADDR);
-  basi2cwrite(slot >> 8);
-  basi2cwrite(slot & 0x0FF);
-  basi2cstart();
-  basi2cwrite(I2CADDR + 1);
-
-  slot *= EEPROMPAGE;
-
-  for (i = 0; i < PGMSIZE;
-       i += EEPROMPAGE) // we assume that pgmsize is dividable by eeprompage
-  {
-    basi2cstart();
-    basi2cwrite(I2CADDR);
-    basi2cwrite((slot + i) >> 8);
-    basi2cwrite((slot + i) & 0x0FF);
-    for (j = 0; j < EEPROMPAGE; j++) {
-      basi2cwrite(basic_program_area[i + j]);
-    }
-    basi2cstop();
-    user_serial_transmit_character('.');
-    waiteeprom();
-  }
-}
-
-void load(void) {
-  int i;
-  int slot;
-
-  consumewhitechars();
-  slot = getint();
-
-  if (slot == 0) { // bpWline("Syntax error");
-    BPMSG1052;
-    return;
-  }
-
-  // bpWstring("Loading from slot ");
-  BPMSG1058;
-  bp_write_dec_byte(slot);
-  bpBR;
-
-  if (slot > (EEPROMSIZE / PGMSIZE)) { // bpWline("Invalid slot");
-    BPMSG1057;
-    return;
-  }
-
-  if (!checkeeprom()) {
-    return;
-  }
-
-  slot *= PGMSIZE;
-
-  basi2cstop();
-  basi2cwrite(I2CADDR);
-  basi2cwrite(slot >> 8);
-  basi2cwrite(slot & 0x0FF);
-  basi2cstart();
-  basi2cwrite(I2CADDR + 1);
-
-  for (i = 0; i < PGMSIZE; i++) {
-    if (!(i % EEPROMPAGE))
-      user_serial_transmit_character('.'); // pure estetic
-    basic_program_area[i] = basi2cread(1);
-  }
-}
-
-#endif /* BP_BASIC_I2C_FILESYSTEM */
-#endif /* BP_ENABLE_BASIC_SUPPORT */

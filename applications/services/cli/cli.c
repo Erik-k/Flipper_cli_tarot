@@ -118,6 +118,7 @@ void cli_motd() {
            "|_|  |____||___||_|  |_|  |___||_|_\\   \\___||____||___|\r\n"
            "\r\n"
            "Welcome to Flipper Zero Command Line Interface!\r\n"
+           "HACKED BY MONICAN >>>>:::::-----))))))\r\n"
            "Read Manual https://docs.flipperzero.one\r\n"
            "\r\n");
 

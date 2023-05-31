@@ -26,9 +26,29 @@
 #ifndef BP_BASIC_H
 #define BP_BASIC_H
 
-#include "configuration.h"
+#include <furi.h>
 
-#ifdef BP_ENABLE_BASIC_SUPPORT
+
+/**
+ * Size of the tokens buffer allocate to the BASIC interpreter, in bytes.
+ */
+#define BP_BASIC_PROGRAM_SPACE 1024
+
+/**
+ * Maximum number of nested FOR-LOOP statements the BASIC interpreter can
+ * handle.
+ * 
+ * Each allowance for a nested FOR-LOOP consumes 6 bytes of RAM.
+ */
+#define BP_BASIC_NESTED_FOR_LOOP_COUNT 4
+
+/**
+ * Maximum stack depth for the BASIC interpreter, in frames.
+ * 
+ * This value changes how many nested GOSUB calls can be made.  Each stack frame
+ * consumes 2 bytes.
+ */
+#define BP_BASIC_STACK_FRAMES_DEPTH 10
 
 /**
  * @brief Clears any previously loaded BASIC program and resets the internal
@@ -44,4 +64,3 @@ void bp_basic_enter_interactive_interpreter(void);
 
 #endif /* BP_ENABLE_BASIC_SUPPORT */
 
-#endif /* !BP_BASIC_H */
