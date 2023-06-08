@@ -1,5 +1,6 @@
 #include "cli_commands.h"
 #include "cli_command_gpio.h"
+#include "basic.h"
 
 #include <furi_hal.h>
 #include <furi_hal_info.h>
@@ -331,8 +332,9 @@ void cli_command_led(Cli* cli, FuriString* args, void* context) {
         furi_string_free(light_name);
         return;
     } else {
+        // get the first block of characters from the string, stopping at the first space
         furi_string_set_n(light_name, args, 0, ws);
-        furi_string_right(args, ws);
+        furi_string_right(args, ws); // get the second block of characters
         furi_string_trim(args);
     }
     // Check light name
@@ -448,6 +450,26 @@ void cli_command_i2c(Cli* cli, FuriString* args, void* context) {
     furi_hal_i2c_release(&furi_hal_i2c_handle_external);
 }
 
+void cli_command_basic(Cli* cli, FuriString* args, void* context){
+    // allow user to enter the BASIC interpreter outlined in basic.c
+    UNUSED(cli);
+    UNUSED(args);
+    UNUSED(context);
+    printf("Entering BASIC interpreter\r\n");
+    bp_basic_enter_interactive_interpreter();
+    //bp_basic_initialize();
+}
+
+void cli_command_test(Cli* cli, FuriString* user_input, void* context) {
+    // take user input with FuriString and echo it back using printf
+    // probably gonna have to copy the LED command to work with a string longer than 5 chars
+    UNUSED(cli);
+    UNUSED(context);
+
+    printf("Running test. Enter a string.\r\n");
+    printf("You entered: %s\r\n", furi_string_get_cstr(user_input));
+}
+
 void cli_commands_init(Cli* cli) {
     cli_add_command(cli, "!", CliCommandFlagParallelSafe, cli_command_info, (void*)true);
     cli_add_command(cli, "info", CliCommandFlagParallelSafe, cli_command_info, NULL);
@@ -468,4 +490,7 @@ void cli_commands_init(Cli* cli) {
     cli_add_command(cli, "led", CliCommandFlagDefault, cli_command_led, NULL);
     cli_add_command(cli, "gpio", CliCommandFlagDefault, cli_command_gpio, NULL);
     cli_add_command(cli, "i2c", CliCommandFlagDefault, cli_command_i2c, NULL);
+
+    cli_add_command(cli, "test", CliCommandFlagDefault, cli_command_test, NULL);
+    cli_add_command(cli, "basic", CliCommandFlagDefault, cli_command_basic, NULL);
 }

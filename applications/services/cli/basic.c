@@ -500,8 +500,9 @@ again: // need to do it proper with whiles and ifs..
 
   while (!stop) {
     //c = user_serial_read_byte();
-    c = cli_getc(cli); //where does this cli instance get created? 
-    switch (c) {
+    FuriString* user_input;
+    furi_string_get_cstr(user_input);
+    switch (user_input) {
     case 0x08:
       if (i) {
         i--;
@@ -534,7 +535,7 @@ again: // need to do it proper with whiles and ifs..
       //if (x)
         return -1; // user wants to quit :( only if we enable it :D
     default:
-      if ((c >= 0x30) && (c <= 0x39)) // we got a digit
+      if ((user_input >= 0x30) && (user_input <= 0x39)) // we got a digit
       {
         if (i > 3) // 0-9999 should be enough??
         {
@@ -542,8 +543,8 @@ again: // need to do it proper with whiles and ifs..
           i = 4;
         } else {
           //user_serial_transmit_character(c);
-          printf("%c", c);
-          buf[i] = c; // store user input
+          printf("%c", user_input);
+          buf[i] = user_input; // store user input
           i++;
         }
       } else // ignore input :)
@@ -581,6 +582,7 @@ again: // need to do it proper with whiles and ifs..
   return temp; // we dont get here, but keep compiler happy
 }
 // end getnumber function
+
 
 void handle_else_statement(void) {
   if (basic_program_area[basic_program_counter] != TOK_ELSE) {
