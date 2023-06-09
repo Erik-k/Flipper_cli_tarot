@@ -502,7 +502,7 @@ again: // need to do it proper with whiles and ifs..
     //c = user_serial_read_byte();
     FuriString* user_input;
     furi_string_get_cstr(user_input);
-    switch (user_input) {
+    switch ((char)user_input) {
     case 0x08:
       if (i) {
         i--;
