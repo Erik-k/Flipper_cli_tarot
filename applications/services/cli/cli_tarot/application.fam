@@ -1,0 +1,10 @@
+App(
+    appid="cli_tarot",
+    name="CLI Tarot Cards",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="cli_command_tarot",
+    requires=["gui"],
+    stack_size=4 * 1024,
+    fap_category="Examples",
+    fap_file_assets="files",
+)
