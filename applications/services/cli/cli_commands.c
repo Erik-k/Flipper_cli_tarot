@@ -1,5 +1,6 @@
 #include "cli_commands.h"
 #include "cli_command_gpio.h"
+#include <cli/cli_tarot/cli_tarot.h>
 #include "basic.h"
 
 #include <furi_hal.h>
@@ -9,6 +10,10 @@
 #include <notification/notification_messages.h>
 #include <loader/loader.h>
 #include <lib/toolbox/args.h>
+
+#include <lib/toolbox/dir_walk.h>
+#include <storage/storage.h>
+#include <storage/storage_sd_api.h>
 
 // Close to ISO, `date +'%Y-%m-%d %H:%M:%S %u'`
 #define CLI_DATE_FORMAT "%.4d-%.2d-%.2d %.2d:%.2d:%.2d %d"
@@ -462,7 +467,6 @@ void cli_command_basic(Cli* cli, FuriString* args, void* context){
 
 void cli_command_test(Cli* cli, FuriString* user_input, void* context) {
     // take user input with FuriString and echo it back using printf
-    // probably gonna have to copy the LED command to work with a string longer than 5 chars
     UNUSED(cli);
     UNUSED(context);
 
@@ -470,101 +474,54 @@ void cli_command_test(Cli* cli, FuriString* user_input, void* context) {
     printf("You entered: %s\r\n", furi_string_get_cstr(user_input));
 }
 
-typedef struct {
-    char name[100];
-    char description[500];
-    int is_reversed;
-} TarotCard;
+// Define log tag
+#define TAG "example_apps_assets"
 
-void shuffle_deck(TarotCard* deck, int num_cards) {
-    srand(time(NULL));
-    for (int i = num_cards - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        TarotCard temp = deck[i];
-        deck[i] = deck[j];
-        deck[j] = temp;
+static void example_apps_data_print_file_content(Storage* storage, const char* path) {
+    Stream* stream = file_stream_alloc(storage);
+    FuriString* line = furi_string_alloc();
+
+    FURI_LOG_I(TAG, "----------------------------------------");
+    printf("----------------------------------------\r\n");
+    FURI_LOG_I(TAG, "File \"%s\" content:", path);
+    printf("File \"%s\" content:", path);
+    if(file_stream_open(stream, path, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        while(stream_read_line(stream, line)) {
+            furi_string_replace_all(line, "\r", "");
+            furi_string_replace_all(line, "\n", "");
+            FURI_LOG_I(TAG, "%s", furi_string_get_cstr(line));
+            printf("%s", furi_string_get_cstr(line));
+        }
+    } else {
+        FURI_LOG_E(TAG, "Failed to open file");
+        printf("Failed to open file\r\n");
     }
+    FURI_LOG_I(TAG, "----------------------------------------");
+
+    furi_string_free(line);
+    file_stream_close(stream);
+    stream_free(stream);
 }
 
-void cli_command_tarot(Cli* cli, FuriString* user_input, void* context) {
-    // create a tarot card type, create an array of tarot cards as a deck, 
-    // and let the user enter a number to do a draw of n cards. Default 3. 
-    // Cards can be reversed or not. 
-    
+void cli_command_testread(Cli* cli, FuriString* user_input, void* context) {
+    // test reading in a .txt file stored on the SD card in /apps_assets/
+    //TODO: take user input for text file name and open that file. This let's user add files during
+    // runtime and read them on the CLI without having to recompile and reupload
+
     UNUSED(cli);
+    UNUSED(user_input);
     UNUSED(context);
 
-    TarotCard deck[] = {
-    { "The Fool", "Upright: A new beginning, innocence, spontaneity.", 0 },
-    { "The Magician", "Upright: Manifestation, resourcefulness, power.", 0 },
-    { "The High Priestess", "Upright: Intuition, sacred knowledge, divine feminine.", 0 },
-    { "The Empress", "Upright: Abundance, nurturing, fertility.", 0 },
-    { "The Emperor", "Upright: Authority, structure, control.", 0 },
-    { "The Hierophant", "Upright: Tradition, conformity, spiritual guidance.", 0 },
-    { "The Lovers", "Upright: Love, harmony, relationships.", 0 },
-    { "The Chariot", "Upright: Determination, willpower, success.", 0 },
-    { "Strength", "Upright: Courage, inner strength, self-confidence.", 0 },
-    { "The Hermit", "Upright: Soul-searching, introspection, guidance.", 0 },
-    { "Wheel of Fortune", "Upright: Change, cycles, fate.", 0 },
-    { "Justice", "Upright: Fairness, truth, cause and effect.", 0 },
-    { "The Hanged Man", "Upright: Suspension, letting go, new perspectives.", 0 },
-    { "Death", "Upright: Transformation, endings, change.", 0 },
-    { "Temperance", "Upright: Balance, moderation, patience.", 0 },
-    { "The Devil", "Upright: Materialism, bondage, addiction.", 0 },
-    { "The Tower", "Upright: Sudden change, upheaval, chaos.", 0 },
-    { "The Star", "Upright: Hope, inspiration, spiritual guidance.", 0 },
-    { "The Moon", "Upright: Illusion, intuition, subconscious.", 0 },
-    { "The Sun", "Upright: Vitality, happiness, success.", 0 },
-    { "Judgment", "Upright: Rebirth, inner calling, absolution.", 0 },
-    { "The World", "Upright: Completion, wholeness, accomplishment.", 0 },
-    // Add reversed versions of the cards
-    { "The Fool", "Reversed: Foolishness, recklessness, indecision.", 1 },
-    { "The Magician", "Reversed: Manipulation, untapped talents, indecision.", 1 },
-    { "The High Priestess", "Reversed: Secrets, hidden influences, lack of intuition.", 1 },
-    { "The Empress", "Reversed: Neglect, dependence, creative block.", 1 },
-    { "The Emperor", "Reversed: Domination, lack of control, chaos.", 1 },
-    { "The Hierophant", "Reversed: Rebellion, nonconformity, challenging beliefs.", 1 },
-    { "The Lovers", "Reversed: Disharmony, conflicts, misalignment of values.", 1 },
-    { "The Chariot", "Reversed: Lack of direction, aggression, obstacles.", 1 },
-    { "Strength", "Reversed: Weakness, self-doubt, lack of courage.", 1 },
-    { "The Hermit", "Reversed: Isolation, loneliness, withdrawal.", 1 },
-    { "Wheel of Fortune", "Reversed: Bad luck, external influences, lack of control.", 1 },
-    { "Justice", "Reversed: Injustice, dishonesty, imbalance.", 1 },
-    { "The Hanged Man", "Reversed: Resistance, delays, indecision.", 1 },
-    { "Death", "Reversed: Resistance to change, fear of transformation, stagnation.", 1 },
-    { "Temperance", "Reversed: Imbalance, extremes, discord.", 1 },
-    { "The Devil", "Reversed: Freedom, release, breaking chains.", 1 },
-    { "The Tower", "Reversed: Personal transformation, fear of change, avoiding disaster.", 1 },
-    { "The Star", "Reversed: Lack of faith, despair, disconnection.", 1 },
-    { "The Moon", "Reversed: Deception, confusion, fear.", 1 },
-    { "The Sun", "Reversed: Inner child, feeling down, temporary depression.", 1 },
-    { "Judgment", "Reversed: Self-doubt, inner critic, lack of self-reflection.", 1 },
-    { "The World", "Reversed: Incompletion, lack of closure, feeling stuck.", 1 }
-};
-    
-    int total_cards = sizeof(deck) / sizeof(deck[0]);
+    // Open storage
+    Storage* api = furi_record_open(RECORD_STORAGE);
 
-    int num_cards = 3;
-    char* cstr = furi_string_get_cstr(user_input);
-    if (strlen(cstr) > 0) {
-        num_cards = atoi(cstr);
-    }
+    example_apps_data_print_file_content(api, "/ext/apps_assets/tarot_deck.txt");
 
-    if (num_cards > total_cards) {
-        printf("There are only %d cards in the deck.\r\n", total_cards);
-        return;
-    }
-
-    shuffle_deck(deck, total_cards);
-
-    for (int i = 0; i < num_cards; i++) {
-        TarotCard card = deck[i];
-        printf("Card: %s\n", card.name);
-        printf("Orientation: %s\n", card.is_reversed ? "Reversed" : "Upright");
-        printf("Description: %s\n", card.description);
-        printf("\n");
-    }
+    // Close storage
+    furi_record_close(RECORD_STORAGE);
 }
+
+
 
 void cli_commands_init(Cli* cli) {
     cli_add_command(cli, "!", CliCommandFlagParallelSafe, cli_command_info, (void*)true);
@@ -589,5 +546,6 @@ void cli_commands_init(Cli* cli) {
 
     cli_add_command(cli, "test", CliCommandFlagDefault, cli_command_test, NULL);
     cli_add_command(cli, "basic", CliCommandFlagDefault, cli_command_basic, NULL);
-    cli_add_command(cli, "tarot", CliCommandFlagDefault, cli_command_tarot, NULL);
+    //cli_add_command(cli, "tarot", CliCommandFlagDefault, cli_command_tarot, NULL);
+    cli_add_command(cli, "test_file_read", CliCommandFlagDefault, cli_command_testread, NULL);
 }
